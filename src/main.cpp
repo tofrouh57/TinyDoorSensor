@@ -1,6 +1,4 @@
 #include <Arduino.h>
-#include <avr/sleep.h>
-//#include <avr/wdt.h>
 
 //#include <SystemStatus.h>
 //#include "ATtinySerialOut.hpp"
@@ -33,6 +31,8 @@ const uint32_t valDoor = 0x09000000;
 volatile bool interruptFiredPC = true;
 volatile bool interruptFiredWDT = false;
 bool doorClosed = false;
+const int nbLoops = 5;
+int loopCounter = 0;
 
 void blinkLEDOnce(int nb, int duree)
 {
@@ -115,6 +115,23 @@ ISR(PCINT0_vect)
   interruptFiredPC = true;
 }
 
+void setupWDT()
+{
+  // setup wdt for 8 secs to proove door state
+  byte bb = 8 & 7;
+  bb |= (1 << 5); // Set the special 5th bit if necessary
+  // This order of commands is important and cannot be combined
+  MCUSR &= ~(1 << WDRF);             // Clear the watch dog reset
+  WDTCR |= (1 << WDCE) | (1 << WDE); // Set WD_change enable, set WD enable
+  WDTCR = bb;                        // Set new watchdog timeout value
+  WDTCR |= _BV(WDIE);                // Set the interrupt enable, this will keep unit from resetting after each int
+
+  // 1. In the same operation, write a logic one to WDCE and WDE. A logic one must be written to WDE even though it is set to one before the disable operation starts.
+  // 2. Within the next four clock cycles, write a logic 0 to WDE. This disables the Watchdog.
+}
+
+
+
 void setup()
 {
 
@@ -137,22 +154,9 @@ void setup()
 
   blinkLED(1, 200);
   GIMSK |= _BV(PCIE); // enable pin  change interrupt
+  setupWDT();
 }
 
-void setupWDT()
-{
-  // setup wdt for 8 secs to proove door state
-  byte bb = 8 & 7;
-  bb |= (1 << 5); // Set the special 5th bit if necessary
-  // This order of commands is important and cannot be combined
-  MCUSR &= ~(1 << WDRF);             // Clear the watch dog reset
-  WDTCR |= (1 << WDCE) | (1 << WDE); // Set WD_change enable, set WD enable
-  WDTCR = bb;                        // Set new watchdog timeout value
-  WDTCR |= _BV(WDIE);                // Set the interrupt enable, this will keep unit from resetting after each int
-
-  // 1. In the same operation, write a logic one to WDCE and WDE. A logic one must be written to WDE even though it is set to one before the disable operation starts.
-  // 2. Within the next four clock cycles, write a logic 0 to WDE. This disables the Watchdog.
-}
 
 void stopWDT()
 {
@@ -174,7 +178,9 @@ void loop()
   {
     delay(100);
     interruptFiredPC = false;
-    setupWDT();
+    checkDoorState = true; // recheck doorstate in next loop
+//    setupWDT();
+
     doorClosed = getDoorState();
     pinMode(PIN_STATE_0, OUTPUT);
     pinMode(PIN_STATE_1, OUTPUT);
@@ -206,18 +212,40 @@ void loop()
 
   doSleep();
   GIFR &= ~(_BV(PCIF));
-  blinkLED(1, 20);
+//  blinkLED(1, 20);
 
   if (interruptFiredWDT == true)
   {
     interruptFiredWDT = false;
-    if (doorClosed == getDoorState())
-    {
-      stopWDT();
+    if (checkDoorState == true)
+    { //  we have to check door if state  has changed since previous loop.
+      checkDoorState = false;
+      if (doorClosed == getDoorState())
+      {
+        // door state confirmed!!!!!
+        // here: send RF message
+//        loopCounter = 0;
+      }
+      else // check door state again in next loop
+      {
+        interruptFiredPC = true;
+//                loopCounter = 0;
+      }
     }
     else
     {
-      interruptFiredPC = true;
+      loopCounter++;
+      if (loopCounter > nbLoops)
+      {
+        loopCounter = 0;
+        checkDoorState = true; // door state to be checked in next iteration
+        blinkLED(2,50);
+        //send heartbeat
+      }
+//      else
+  //      doSleep();
+      // count and if 1 hr delay is reached, recheck door state
+
     }
   }
 }
