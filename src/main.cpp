@@ -1,18 +1,9 @@
 #include <Arduino.h>
+#include <avr/sleep.h>
+#include <RCSwitch.h>
 
-//#include <SystemStatus.h>
-//#include "ATtinySerialOut.hpp"
-
-/*uint8_t width = 128;
-  uint8_t height = 32;
-  oled.begin(width, height, sizeof(tiny4koled_init_128x32br), tiny4koled_init_128x32br);
-
-*/
 
 const uint32_t deviceNumber = 0x50000000;
-const uint32_t valTemp = 0x01000000;
-const uint32_t valHum = 0x02000000;
-const uint32_t valPres = 0x03000000;
 const uint32_t valVolts = 0x04000000;
 const uint32_t valDoor = 0x09000000;
 
@@ -30,9 +21,13 @@ const uint32_t valDoor = 0x09000000;
 
 volatile bool interruptFiredPC = true;
 volatile bool interruptFiredWDT = false;
+bool checkDoorState = false;
 bool doorClosed = false;
 const int nbLoops = 5;
 int loopCounter = 0;
+
+RCSwitch mySwitch = RCSwitch();
+
 
 void blinkLEDOnce(int nb, int duree)
 {
@@ -84,6 +79,29 @@ bool getDoorState()
   }
 }
 
+
+long readVcc() {
+  long result;
+  // Read 1.1V reference against AVcc
+#if defined(__AVR_ATmega32U4__) || defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
+  ADMUX = _BV(REFS0) | _BV(MUX4) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+#elif defined (__AVR_ATtiny24__) || defined(__AVR_ATtiny44__) || defined(__AVR_ATtiny84__)
+  ADMUX = _BV(MUX5) | _BV(MUX0);
+#elif defined (__AVR_ATtiny25__) || defined(__AVR_ATtiny45__) || defined(__AVR_ATtiny85__)
+  ADMUX = _BV(MUX3) | _BV(MUX2);
+#else
+  ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+#endif
+  delay(2); // Wait for Vref to settle
+  ADCSRA |= _BV(ADSC); // Convert
+  while (bit_is_set(ADCSRA, ADSC));
+  result = ADCL;
+  result |= ADCH << 8;
+  result = 1126400L / result; // Calculate Vcc (in mV); 1126400 = 1.1*1024*1000
+  return result;
+}
+
+
 void doSleep()
 {
   //  GIMSK |= _BV(PCIE); // enable pin  change interrupt
@@ -118,8 +136,8 @@ ISR(PCINT0_vect)
 void setupWDT()
 {
   // setup wdt for 8 secs to proove door state
-  byte bb = 8 & 7;
-  bb |= (1 << 5); // Set the special 5th bit if necessary
+  byte bb = 8 & 7; // 8=4sec 9=8 sec
+  bb |= (1 << 5);  // Set the special 5th bit if necessary
   // This order of commands is important and cannot be combined
   MCUSR &= ~(1 << WDRF);             // Clear the watch dog reset
   WDTCR |= (1 << WDCE) | (1 << WDE); // Set WD_change enable, set WD enable
@@ -135,8 +153,15 @@ void setupWDT()
 void setup()
 {
 
-  delay(1000);
+  pinMode(PIN_NO, OUTPUT);       digitalWrite(PIN_NO, LOW);
+  pinMode(PIN_NC, OUTPUT);       digitalWrite(PIN_NC, LOW);
+  pinMode(PIN_RF_VCC, OUTPUT);   digitalWrite(PIN_RF_VCC, LOW);
+  pinMode(PIN_RF_DATA, OUTPUT);  digitalWrite(PIN_RF_DATA, LOW);
+  pinMode(PB0, OUTPUT);          digitalWrite(PB0, LOW);
+
   doorClosed = getDoorState();
+
+/*
   pinMode(PIN_STATE_0, OUTPUT);
   pinMode(PIN_STATE_1, OUTPUT);
   pinMode(PIN_STATE_2, OUTPUT);
@@ -151,10 +176,13 @@ void setup()
   {
     digitalWrite(PIN_STATE_1, HIGH);
   }
+*/
+  mySwitch.enableTransmit(PIN_RF_DATA); //simply sets pin number to output
 
-  blinkLED(1, 200);
+//  blinkLED(1, 200);
   GIMSK |= _BV(PCIE); // enable pin  change interrupt
   setupWDT();
+
 }
 
 
@@ -162,21 +190,43 @@ void stopWDT()
 {
   __asm__ __volatile__("wdr"
                        "\n\t" ::);
-//_WDR();
-MCUSR = 0x00;
-WDTCR |= (1<<WDCE) | (1<<WDE);
-WDTCR = 0x00;
+  //_WDR();
+  MCUSR = 0x00;
+  WDTCR |= (1 << WDCE) | (1 << WDE);
+  WDTCR = 0x00;
 
-//  WDTCR |= (1 << WDCE) | (1 << WDE); // Set WD_change enable, set WD enable
-//  WDTCR &= ~(_BV(WDE));
+  //  WDTCR |= (1 << WDCE) | (1 << WDE); // Set WD_change enable, set WD enable
+  //  WDTCR &= ~(_BV(WDE));
+}
+
+
+void sendDoorState(bool doorState)
+{
+      uint32_t door = doorState + deviceNumber + valDoor;
+      digitalWrite(PIN_RF_VCC, HIGH);
+      mySwitch.send(door, 32);
+      digitalWrite(PIN_RF_VCC, LOW);
+      digitalWrite(PIN_RF_DATA, LOW);
+}
+
+void sendVcc()
+{
+      uint32_t battery = readVcc();
+      battery = battery + deviceNumber + valVolts;
+      digitalWrite(PIN_RF_VCC, HIGH);
+      mySwitch.send(battery, 32);
+      digitalWrite(PIN_RF_VCC, LOW);
+      digitalWrite(PIN_RF_DATA, LOW);
+
+
 }
 
 void loop()
 {
 
+
   if (interruptFiredPC == true)
   {
-    delay(100);
     interruptFiredPC = false;
     checkDoorState = true; // recheck doorstate in next loop
 //    setupWDT();
@@ -222,9 +272,7 @@ void loop()
       checkDoorState = false;
       if (doorClosed == getDoorState())
       {
-        // door state confirmed!!!!!
-        // here: send RF message
-//        loopCounter = 0;
+        sendDoorState(doorClosed);
       }
       else // check door state again in next loop
       {
@@ -238,9 +286,9 @@ void loop()
       if (loopCounter > nbLoops)
       {
         loopCounter = 0;
-        checkDoorState = true; // door state to be checked in next iteration
-        blinkLED(2,50);
-        //send heartbeat
+        //did door state change within last period of wdt seconds * nbcount?
+        if (doorClosed != getDoorState()) checkDoorState = true; // door state to be checked in next iteration
+        sendVcc();//send heartbeat aftr each period
       }
 //      else
   //      doSleep();
