@@ -23,7 +23,7 @@ volatile bool interruptFiredPC = true;
 volatile bool interruptFiredWDT = false;
 bool checkDoorState = false;
 bool doorClosed = false;
-const int nbLoops = 5;
+const int nbLoops = 800; // nbloops * 9 seconds = wait time before next check. (800 = 2h)
 int loopCounter = 0;
 
 RCSwitch mySwitch = RCSwitch();
@@ -136,7 +136,7 @@ ISR(PCINT0_vect)
 void setupWDT()
 {
   // setup wdt for 8 secs to proove door state
-  byte bb = 8 & 7; // 8=4sec 9=8 sec
+  byte bb = 9 & 7; // 8=4sec 9=8 sec
   bb |= (1 << 5);  // Set the special 5th bit if necessary
   // This order of commands is important and cannot be combined
   MCUSR &= ~(1 << WDRF);             // Clear the watch dog reset
